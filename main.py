@@ -7,6 +7,8 @@ import os
 import glob
 import base64
 import threading
+from flask_cors import CORS
+import tkinter as tk
 
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO
@@ -23,14 +25,18 @@ image_saved = False
 completion_message_time = None     # 「送信完了」表示開始時刻
 completion_message_duration = 3.0  # 送信完了メッセージ表示時間（秒）
 
-# 表示用の最大サイズ（画面内に収まるように）
-MAX_DISPLAY_WIDTH = 1280
-MAX_DISPLAY_HEIGHT = 720
+# ディスプレイサイズ（動的に取得）
+DISPLAY_WIDTH = None
+DISPLAY_HEIGHT = None
+
+# 全画面表示状態
+is_fullscreen = True
 
 # ============================================================
 # Flask + SocketIO 設定
 # ============================================================
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 
@@ -104,14 +110,33 @@ def get_scan_image():
 # ============================================================
 # ユーティリティ関数
 # ============================================================
-def resize_for_display(frame, max_width=MAX_DISPLAY_WIDTH, max_height=MAX_DISPLAY_HEIGHT):
-    """フレームを画面内に収まるようにリサイズ（アスペクト比維持）"""
-    h, w = frame.shape[:2]
-    if w <= max_width and h <= max_height:
-        return frame
+def get_display_size():
+    """ディスプレイサイズを取得"""
+    global DISPLAY_WIDTH, DISPLAY_HEIGHT
+    if DISPLAY_WIDTH is not None and DISPLAY_HEIGHT is not None:
+        return DISPLAY_WIDTH, DISPLAY_HEIGHT
+    
+    try:
+        root = tk.Tk()
+        DISPLAY_WIDTH = root.winfo_screenwidth()
+        DISPLAY_HEIGHT = root.winfo_screenheight()
+        root.destroy()
+        print(f"📺 ディスプレイサイズ: {DISPLAY_WIDTH}x{DISPLAY_HEIGHT}")
+        return DISPLAY_WIDTH, DISPLAY_HEIGHT
+    except Exception as e:
+        print(f"⚠ ディスプレイサイズ取得エラー: {e} → デフォルト値を使用")
+        DISPLAY_WIDTH = 1920
+        DISPLAY_HEIGHT = 1080
+        return DISPLAY_WIDTH, DISPLAY_HEIGHT
 
-    scale_w = max_width / w
-    scale_h = max_height / h
+def resize_for_display(frame):
+    """フレームをディスプレイサイズに合わせてリサイズ（アスペクト比維持）"""
+    display_w, display_h = get_display_size()
+    h, w = frame.shape[:2]
+    
+    # ディスプレイサイズに合わせてリサイズ
+    scale_w = display_w / w
+    scale_h = display_h / h
     scale = min(scale_w, scale_h)
     new_width = int(w * scale)
     new_height = int(h * scale)
@@ -158,25 +183,110 @@ def find_japanese_font(font_size=60):
     print("警告: 日本語フォントが見つかりません。デフォルトフォントを使用します。")
     return ImageFont.load_default()
 
-def put_japanese_text(img, text, position, font_size=60, color=(0, 255, 0)):
-    """日本語テキストを画像に描画（背景付き）"""
+def draw_rounded_rectangle(draw, xy, radius, fill=None, outline=None, width=1):
+    """角丸矩形を描画（Pillowの古いバージョン対応、RGBA対応）"""
+    x1, y1, x2, y2 = xy
+    r = radius
+    
+    # RGBAタプルの場合はRGBのみを抽出
+    if isinstance(fill, tuple) and len(fill) == 4:
+        fill_rgb = fill[:3]
+    else:
+        fill_rgb = fill
+    
+    # 角丸の部分を描画
+    draw.ellipse([x1, y1, x1 + 2*r, y1 + 2*r], fill=fill_rgb, outline=outline, width=width)  # 左上
+    draw.ellipse([x2 - 2*r, y1, x2, y1 + 2*r], fill=fill_rgb, outline=outline, width=width)  # 右上
+    draw.ellipse([x1, y2 - 2*r, x1 + 2*r, y2], fill=fill_rgb, outline=outline, width=width)  # 左下
+    draw.ellipse([x2 - 2*r, y2 - 2*r, x2, y2], fill=fill_rgb, outline=outline, width=width)  # 右下
+    
+    # 矩形の中央部分を描画
+    draw.rectangle([x1 + r, y1, x2 - r, y2], fill=fill_rgb, outline=None)  # 横
+    draw.rectangle([x1, y1 + r, x2, y2 - r], fill=fill_rgb, outline=None)  # 縦
+
+def put_japanese_text_modern(img, text, position, font_size=80, 
+                            text_color=(255, 255, 255), 
+                            bg_color=(0, 0, 0, 180),
+                            shadow=True,
+                            center=True):
+    """モダンなデザインで日本語テキストを画像に描画"""
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(img_rgb)
+    
+    # RGBAモードに変換（透明度対応）
+    if pil_img.mode != 'RGBA':
+        pil_img = pil_img.convert('RGBA')
+    
     font = find_japanese_font(font_size)
     draw = ImageDraw.Draw(pil_img)
 
-    x, y = position
-    bbox = draw.textbbox((x, y), text, font=font)
-    text_left, text_top, text_right, text_bottom = bbox
-
-    padding = 10
-    draw.rectangle(
-        [(text_left - padding, text_top - padding),
-         (text_right + padding, text_bottom + padding)],
-        fill=(0, 0, 0)
-    )
-
-    draw.text(position, text, font=font, fill=color)
+    # テキストのサイズを取得
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    
+    # パディング設定
+    padding_x = int(font_size * 0.8)
+    padding_y = int(font_size * 0.5)
+    corner_radius = int(font_size * 0.3)
+    
+    # 位置の計算（中央揃えの場合）
+    if center:
+        x, y = position
+        box_x1 = x - text_width // 2 - padding_x
+        box_y1 = y - text_height // 2 - padding_y
+        box_x2 = x + text_width // 2 + padding_x
+        box_y2 = y + text_height // 2 + padding_y
+        text_x = x - text_width // 2
+        text_y = y - text_height // 2
+    else:
+        x, y = position
+        box_x1 = x - padding_x
+        box_y1 = y - padding_y
+        box_x2 = x + text_width + padding_x
+        box_y2 = y + text_height + padding_y
+        text_x = x
+        text_y = y
+    
+    # 影を描画（オプション）
+    if shadow:
+        shadow_offset = int(font_size * 0.05)
+        shadow_box = (
+            box_x1 + shadow_offset,
+            box_y1 + shadow_offset,
+            box_x2 + shadow_offset,
+            box_y2 + shadow_offset
+        )
+        draw_rounded_rectangle(
+            draw, shadow_box, corner_radius,
+            fill=(0, 0, 0, 100)
+        )
+    
+    # 背景ボックスを描画（半透明）
+    if isinstance(bg_color, tuple) and len(bg_color) == 4:
+        # RGBAモードで半透明背景を描画
+        bg_img = Image.new('RGBA', pil_img.size, (0, 0, 0, 0))
+        bg_draw = ImageDraw.Draw(bg_img)
+        draw_rounded_rectangle(
+            bg_draw, (box_x1, box_y1, box_x2, box_y2), corner_radius,
+            fill=bg_color
+        )
+        pil_img = Image.alpha_composite(pil_img, bg_img)
+        draw = ImageDraw.Draw(pil_img)
+    else:
+        # 不透明背景
+        bg_rgb = bg_color[:3] if len(bg_color) > 3 else bg_color
+        draw_rounded_rectangle(
+            draw, (box_x1, box_y1, box_x2, box_y2), corner_radius,
+            fill=bg_rgb
+        )
+    
+    # テキストを描画
+    draw.text((text_x, text_y), text, font=font, fill=text_color)
+    
+    # BGRに変換して返す
+    if pil_img.mode == 'RGBA':
+        pil_img = pil_img.convert('RGB')
     img_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     return img_bgr
 
@@ -234,6 +344,59 @@ def four_point_transform(image, pts):
     M = cv2.getPerspectiveTransform(rect, dst)
     warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight), flags=cv2.INTER_LANCZOS4)
     return warped
+
+def draw_minimize_button(frame, button_size=50, margin=20):
+    """右上に最小化ボタンを描画（リサイズ後のフレーム用）"""
+    h, w = frame.shape[:2]
+    
+    # ボタンの位置（右上）
+    button_x = w - button_size - margin
+    button_y = margin
+    button_x2 = w - margin
+    button_y2 = margin + button_size
+    
+    # 背景（半透明のダークグレー）
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (button_x, button_y), (button_x2, button_y2), (40, 40, 40), -1)
+    frame = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
+    
+    # ボーダー
+    cv2.rectangle(frame, (button_x, button_y), (button_x2, button_y2), (200, 200, 200), 2)
+    
+    # ×アイコンを描画
+    line_thickness = max(2, int(button_size * 0.06))
+    line_length = button_size // 3
+    center_x = button_x + button_size // 2
+    center_y = button_y + button_size // 2
+    
+    # ×の線を描画
+    cv2.line(frame, 
+             (center_x - line_length // 2, center_y - line_length // 2),
+             (center_x + line_length // 2, center_y + line_length // 2),
+             (255, 255, 255), line_thickness)
+    cv2.line(frame,
+             (center_x - line_length // 2, center_y + line_length // 2),
+             (center_x + line_length // 2, center_y - line_length // 2),
+             (255, 255, 255), line_thickness)
+    
+    return frame, (button_x, button_y, button_x2, button_y2)
+
+def mouse_callback(event, x, y, flags, param):
+    """マウスクリックイベントのコールバック"""
+    global is_fullscreen
+    
+    if event == cv2.EVENT_LBUTTONDOWN:
+        # ボタンエリアの取得（paramから）
+        if param and len(param) == 4:
+            button_x, button_y, button_x2, button_y2 = param
+            
+            # クリック位置がボタンエリア内かチェック
+            if button_x <= x <= button_x2 and button_y <= y <= button_y2:
+                # 全画面を解除
+                window_name = "Corner Detection"
+                cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+                is_fullscreen = False
+                print("🖥 全画面表示を解除しました")
 
 
 # ============================================================
@@ -328,6 +491,16 @@ def camera_loop():
         pass
 
     print("🎥 カメラ初期化完了。待機モードで起動します。")
+    
+    # ウィンドウを全画面表示に設定
+    window_name = "Corner Detection"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    print("🖥 全画面表示モードに設定しました")
+    
+    # マウスイベントのコールバックを設定（初期値はNone、ループ内で更新）
+    button_area = None
+    cv2.setMouseCallback(window_name, mouse_callback, button_area)
 
     # ---------- メインループ ----------
     while True:
@@ -353,24 +526,39 @@ def camera_loop():
             cv2.rectangle(overlay, (0, 0), (w, h), gray_color, -1)
             frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
 
-            # 待機中 or 送信完了メッセージを表示
+            # 待機中 or 送信完了メッセージを表示（モダンなデザイン）
             if completion_message_time is not None:
-                frame = put_japanese_text(
+                # 送信完了：緑色のテキスト、半透明のダークグレー背景
+                frame = put_japanese_text_modern(
                     frame, "送信完了",
-                    position=(w // 2 - 150, h // 2 - 40),
-                    font_size=80,
-                    color=(0, 255, 0)
+                    position=(w // 2, h // 2),
+                    font_size=100,
+                    text_color=(76, 175, 80),  # モダンな緑色
+                    bg_color=(30, 30, 30, 200),  # 半透明のダークグレー
+                    shadow=True,
+                    center=True
                 )
             else:
-                frame = put_japanese_text(
+                # 待機中：白色のテキスト、半透明のダークグレー背景
+                frame = put_japanese_text_modern(
                     frame, "待機中",
-                    position=(w // 2 - 150, h // 2 - 40),
-                    font_size=80,
-                    color=(255, 255, 255)
+                    position=(w // 2, h // 2),
+                    font_size=100,
+                    text_color=(255, 255, 255),  # 白色
+                    bg_color=(30, 30, 30, 200),  # 半透明のダークグレー
+                    shadow=True,
+                    center=True
                 )
 
             display_frame = resize_for_display(frame)
-            cv2.imshow("Corner Detection", display_frame)
+            
+            # リサイズ後のフレームに最小化ボタンを描画
+            display_frame, button_area = draw_minimize_button(display_frame)
+            
+            # マウスコールバックにボタンエリアを渡す
+            cv2.setMouseCallback(window_name, mouse_callback, button_area)
+            
+            cv2.imshow(window_name, display_frame)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
@@ -494,7 +682,14 @@ def camera_loop():
             image_saved = False
 
         display_frame = resize_for_display(frame)
-        cv2.imshow("Corner Detection", display_frame)
+        
+        # リサイズ後のフレームに最小化ボタンを描画
+        display_frame, button_area = draw_minimize_button(display_frame)
+        
+        # マウスコールバックにボタンエリアを渡す
+        cv2.setMouseCallback(window_name, mouse_callback, button_area)
+        
+        cv2.imshow(window_name, display_frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
@@ -520,8 +715,12 @@ socketio.run(
     app,
     host="0.0.0.0",
     port=5001,
+    # ssl_context=(
+    #     "/home/to-murakami/Documents/reception-scan-camera/certs/cert.pem",
+    #     "/home/to-murakami/Documents/reception-scan-camera/certs/key.pem"
+    # )
     ssl_context=(
-        "/home/to-murakami/Documents/reception-scan-camera/certs/cert.pem",
-        "/home/to-murakami/Documents/reception-scan-camera/certs/key.pem"
+        "/home/to-murakami/Documents/reception-scan-camera/certs/fullchain.pem",
+        "/home/to-murakami/Documents/reception-scan-camera/certs/server.key"
     )
 )

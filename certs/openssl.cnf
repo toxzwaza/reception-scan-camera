@@ -1,0 +1,28 @@
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+req_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+C = JP
+ST = Okayama
+L = Kurashiki
+O = Akioka
+OU = DX
+CN = 192.168.210.90
+
+[v3_req]
+subjectAltName = @alt_names
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth, clientAuth
+
+[alt_names]
+# Raspberry Pi の IP
+IP.1 = 192.168.210.90
+
+# よく利用するホスト名
+DNS.1 = localhost
+DNS.2 = raspberrypi
+DNS.3 = akioka-scan.local
