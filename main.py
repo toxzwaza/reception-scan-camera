@@ -516,4 +516,12 @@ if __name__ == "__main__":
 
     # SocketIO（= Flask + WebSocket）サーバを起動
     # eventlet か gevent を入れておくとより安定
-socketio.run(app, host="0.0.0.0", port=5001)
+socketio.run(
+    app,
+    host="0.0.0.0",
+    port=5001,
+    ssl_context=(
+        "/home/to-murakami/Documents/reception-scan-camera/certs/cert.pem",
+        "/home/to-murakami/Documents/reception-scan-camera/certs/key.pem"
+    )
+)

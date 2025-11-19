@@ -10,12 +10,13 @@ import os
 RASPI_IP = "192.168.210.90"      # ← Raspberry Pi の IP
 PORT = 5001
 
-START_URL = f"http://{RASPI_IP}:{PORT}/start_scan"
-GET_IMAGE_URL = f"http://{RASPI_IP}:{PORT}/get_scan_image"
-WS_URL = f"http://{RASPI_IP}:{PORT}"
+START_URL = f"https://{RASPI_IP}:{PORT}/start_scan"
+GET_IMAGE_URL = f"https://{RASPI_IP}:{PORT}/get_scan_image"
+WS_URL = f"https://{RASPI_IP}:{PORT}"
 
 # ====== Socket.IO クライアント ======
-sio = socketio.Client()
+# SSL検証を無効化（自己署名証明書の場合）
+sio = socketio.Client(ssl_verify=False)
 
 @sio.event
 def connect():
@@ -31,7 +32,7 @@ def on_scan_completed(data):
 
     # 画像を取得
     print("📡 /get_scan_image を取得中...")
-    r = requests.get(GET_IMAGE_URL)
+    r = requests.get(GET_IMAGE_URL, verify=False)
     
     if r.status_code != 200:
         print("❌ /get_scan_image エラー:", r.text)
@@ -68,7 +69,7 @@ def main():
     sio.connect(WS_URL, transports=["websocket"])
 
     print("\n▶ /start_scan を送信してスキャンを開始")
-    r = requests.post(START_URL)
+    r = requests.post(START_URL, verify=False)
     print("レスポンス:", r.json())
 
     print("\n📡 スキャン完了通知を待機中...\n")
